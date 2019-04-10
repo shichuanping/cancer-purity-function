@@ -1,0 +1,570 @@
+---
+title: "BRCA"
+author: "chuanping shi"
+date: "2019/3/12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+
+#file download from paper, include IHC value
+sample_alllist<- read.table("/home/shicp/project/FINAL/sample_alllist.txt",header=T,sep = "\t")
+###TCGA cancer types
+CANCER_type<- read.table("/home/shicp/project/FINAL/CANCER_type.txt",header=T,sep = "\t")
+path <- "/home/shicp/project/FINAL/"
+
+for(i in CANCER_type$CANCER_type){
+  
+  a<-sample_alllist[which(sample_alllist$Cancer.type==i),]
+  # eg. "/home/shicp/project/FINAL/ACC_CNV.txt", manifeast file downloaded from TCGA
+  b<-paste0(path,i,"_CNV.txt",seq="",collapse = "")
+  # eg. "/home/shicp/project/FINAL/ACC_SNV.txt", manifeast file download from TCGA
+  c<-paste0(path,i,"_SNV.txt",seq="",collapse = "")
+  A<- read.table(b,header=T,sep = "\t")
+  B<- read.table(c,header=T,sep = "\t")
+  
+
+
+library(GenomicDataCommons)
+library(magrittr)
+
+TCGAtranslateID = function(file_names, legacy = FALSE)
+{
+  info = files(legacy = legacy) %>%
+    GenomicDataCommons::filter( ~ file_id %in% file_names$id) %>%
+    GenomicDataCommons::select('cases.samples.submitter_id') %>%
+    GenomicDataCommons::results_all()
+
+  id_list = lapply(info$cases,function(a)
+  {
+    a[[1]][[1]][[1]]
+  })
+
+    barcodes_per_file = sapply(id_list,length)
+
+    return(data.frame(file_id=rep(GenomicDataCommons::ids(info),barcodes_per_file), submitter_id=unlist(id_list)))
+}
+res=TCGAtranslateID(A)
+TCGA_CNV_TXT_id_trnslater<-res
+
+res=TCGAtranslateID(B)
+TCGA_SNV_VCF_id_trnslater<-res
+
+#merge
+names(TCGA_CNV_TXT_id_trnslater)[1:2]<-c("cnv_uuid","Sample.ID")
+names(TCGA_SNV_VCF_id_trnslater)[1:2]<-c("snv_uuid","Sample.ID")
+C<-merge.data.frame(a,TCGA_SNV_VCF_id_trnslater,all =  FALSE,by.x = "Sample.ID",by.y = "Sample.ID" )
+D<-merge.data.frame(C,TCGA_CNV_TXT_id_trnslater,all = FALSE,by="Sample.ID")
+E<-duplicated(D$Sample.ID)
+E<-D[!E,]
+d<-paste0(path,i,"_list0.csv",seq="",collapse = "")
+write.csv(E,file=d,quote = FALSE,row.names =FALSE)
+}
+
+
+library(e1071)
+library(pROC)
+library(MASS)
+A<-read.table("/home/shicp/program/cancer1.txt",header=T,sep = "\t")
+for (i in A$TYPE) {
+ p<-paste("/home/shicp/program",i,"CNV",sep='/')
+ b<-paste("/home/shicp/program",i,sep='/')
+ C<-paste("data_V2.0",i,sep='_')
+fileNames <- dir(p)  ##获取该路径下的文件名
+filePath <- sapply(fileNames, function(x){ 
+                 paste(p,x,sep='/')})   ##生成读取文件路径
+data <- lapply(filePath, function(x){
+             read.table(x, header=T,sep = "\t")})
+   for (j in 1:length(data)) {
+      data[[j]]$length<-data[[j]]$End-data[[j]]$Start
+    data[[j]]$Segment_Mean<-round(data[[j]]$Segment_Mean,digits = 3)
+   }
+#data[[1]]$length<-data[[1]]$End-data[[1]]$Start
+ #data[[1]]$Segment_Mean<-round(data[[1]]$Segment_Mean,digits = 3)
+
+data1=data
+for (j in 1:length(data1)) {
+  data1[[j]]<-data1[[j]][which(data1[[j]]$length>1000000),]
+   name<-fileNames[j]
+  a<-as.data.frame(tapply(data1[[j]]$length, data1[[j]]$Segment_Mean, sum))
+  names(a)="number"
+  a$Segment_Mean<-rownames(a)
+  assign(name,a)
+}
+out_filePath <- sapply(fileNames, function(x){ 
+                 paste(b,x,sep='/')}) 
+
+for(j in 1:length(data)){
+  write.csv(get(fileNames[[j]]), file=out_filePath[j],quote = FALSE,row.names = FALSE)
+}
+
+data0 <- lapply(out_filePath, function(x){
+             read.csv(x, header=T)})
+for (j in 1:length(data0)) {
+  data0[[j]]$number<-round(data0[[j]]$number/1000000,digits = 0)
+}
+ for (j in 1:length(data0)) {
+  b=as.vector(data0[[j]]$number)
+  c=as.vector(data0[[j]]$Segment_Mean)
+   name<-fileNames[j]
+   x<-0
+   z<-c()
+  for (I in 1:length(b)){
+  x<-1:b[I]
+  x[]<-c[I]
+  z<-c(z,x)
+  assign(name,z)
+  }
+  }
+
+
+
+for(j in 1:length(data0)){
+  write.csv(get(fileNames[[j]]), file=out_filePath[j],quote = FALSE,row.names = FALSE)
+}
+
+data_V1.0 <- lapply(out_filePath, function(x){
+             read.csv(x, header=T)})
+
+z<-c()
+for (j in 1:length(data_V1.0)) {
+  a<-dudahart2(data_V1.0[[j]],x,alpha=0.001)$cluster1
+  name<-fileNames[j]
+if (a == FALSE){
+ pamk.result <-pamk(data_V1.0[[j]],krange=2:8,criterion="asw", usepam=TRUE,
+
+scaling=FALSE, alpha=0.001, diss=inherits(data, "dist"),    critout=FALSE, ns=8, seed=NULL)
+ A<-pamk.result[[1]]$clustering
+ B<-as.data.frame(table(A))
+  b<-as.data.frame(B[,2])
+  c<-as.data.frame(pamk.result[[1]]$medoids)
+  d<-cbind(b,c)
+  names(d)[1:2]<-c("Length","Segment_Mean")
+  assign(name,d)
+}else{
+ z<-name(j)
+}
+} 
+for(j in 1:length(data_V1.0)){
+  write.csv(get(fileNames[[j]]), file=out_filePath[j],quote = FALSE,row.names = FALSE)
+}
+data_V2.0 <- lapply(out_filePath, function(x){
+             read.csv(x, header=T)})
+
+assign(i,data_V2.0)
+}
+
+
+A<-read.table("/home/shicp/program/cancer.txt",header=T,sep = "\t")
+for (j in A$TYPE) {
+ p<-paste("/home/shicp/program",j,sep='/')
+fileNames <- dir(p)  ##获取该路径下的文件名
+fileNames=fileNames[2:length(fileNames)]
+filePath <- sapply(fileNames, function(x){ 
+                 paste(p,x,sep='/')})   ##生成读取文件路径
+data_V2.0 <- lapply(filePath, function(x){
+             read.csv(x, header=T)})
+y<-c()
+  for(i in 1:length(data_V2.0)){
+    names(data_V2.0[[i]])<-c("Length","Segment_Mean")
+    data_V2.0[[i]]$Segment_Mean<-round(data_V2.0[[i]]$Segment_Mean,digits = 2)
+    data_V2.0[[i]]$copy_number<-data_V2.0[[i]]$Segment_Mean
+    name<-fileNames[i]
+    data_V2.0[[i]][which(data_V2.0[[i]]$Segment_Mean<= -0.6),3]<-"A"
+    data_V2.0[[i]][intersect(which(data_V2.0[[i]]$Segment_Mean<= -0.1),which(data_V2.0[[i]]$Segment_Mean> -0.6)),3]<-"B"
+    data_V2.0[[i]][intersect(which(data_V2.0[[i]]$Segment_Mean<=  0.4),which(data_V2.0[[i]]$Segment_Mean> -0.1)),3]<-"C"
+    data_V2.0[[i]][intersect(which(data_V2.0[[i]]$Segment_Mean<= 0.9),which(data_V2.0[[i]]$Segment_Mean> 0.4)),3]<-"D"
+    data_V2.0[[i]][intersect(which(data_V2.0[[i]]$Segment_Mean<= 1.4),which(data_V2.0[[i]]$Segment_Mean> 0.9 )),3]<-"E"
+    data_V2.0[[i]][intersect(which(data_V2.0[[i]]$Segment_Mean<= 1.9),which(data_V2.0[[i]]$Segment_Mean> 1.4 )),3]<-"F"
+    data_V2.0[[i]][intersect(which(data_V2.0[[i]]$Segment_Mean<= 2.3),which(data_V2.0[[i]]$Segment_Mean> 1.9 )),3]<-"G"
+    data_V2.0[[i]][intersect(which(data_V2.0[[i]]$Segment_Mean<= 2.8),which(data_V2.0[[i]]$Segment_Mean> 2.3 )),3]<-"H"
+    data_V2.0[[i]][intersect(which(data_V2.0[[i]]$Segment_Mean<= 3.3),which(data_V2.0[[i]]$Segment_Mean> 2.8 )),3]<-"I"
+    a<-as.data.frame(table(data_V2.0[[i]]$copy_number))
+    if (all(a$Freq==1)){
+      
+    }
+    else {z<-i
+    y<-rbind(y,z)}
+  }
+
+
+#   for (i in 1:length(data_V2.0)) {
+#     name<-fileNames[i]
+#     
+#     a<-as.data.frame(tapply(data_V2.0[[i]]$Length, data_V2.0[[i]]$copy_number, sum))
+#     names(a)="length"
+#     a$lable<-rownames(a)
+#     b<-merge.data.frame(a,data_V2.0[[i]],all.x = TRUE,by.x = "lable",by.y = "copy_number")
+#     c<-duplicated(b$lable)
+#     b<-b[!c,]
+#     b<-b[,-3]
+#     assign(name,b)
+#   }
+# as.numeric()
+#   a<-as.data.frame(tapply(data_V2.0[[2]]$Length, data_V2.0[[2]]$copy_number, sum))
+# 
+# 
+#   for(i in 1:length(data_V2.0)){
+#     write.csv(get(fileNames[[i]]), file=filePath[i],quote = FALSE,row.names = FALSE)
+#   }
+  
+  data_V3.0 <- lapply(filePath, function(x){
+    read.csv(x, header=T)})
+  
+  
+  #add zero
+  h = data.frame()
+  for(i in 1:length(data_V3.0)){
+    b = data.frame(lable=c("A","B","C","D","E"))
+    c<-merge.data.frame(b,data_V3.0[[i]],by.y = "lable",by.x = "lable",all.x = TRUE)
+    c[is.na(c)] <- 0
+    names(c)=c("Lable","length","Segment_Mean")
+    c<-t(c)
+    d<-as.data.frame(c,stringsAsFactors=FALSE)
+    names(d)<-c("A","B","C","D","E")
+    
+    d$sample<-strsplit(fileNames[i], ".txt")
+    d<-d[-1,]
+    e<-d[1,]
+    f<-d[2,]
+    names(f)=c("A1","B1","C1","D1","E1")
+    f<-f[,-6]
+    g<-cbind.data.frame(e,f,stringsAsFactors=FALSE)
+    
+    if (!as.numeric(as.character(g[1,7]))==0.00){
+      X<-as.numeric(as.character(g[1,7]))
+      x<-1
+    }else if (!as.numeric(as.character(g[1,8]))==0.00){
+      X<-as.numeric(as.character(g[1,8]))
+      x<-2
+    }else if (!as.numeric(as.character(g[1,9]))==0.00){
+      X<-as.numeric(as.character(g[1,9]))
+      x<-3
+    }
+    if (!as.numeric(as.character(g[1,11]))==0.00){
+      Y<-as.numeric(as.character(g[1,11]))
+      y<-5
+    }else if (!as.numeric(as.character(g[1,10]))==0.00){
+      Y<-as.numeric(as.character(g[1,10]))
+      y<-4
+    }else if (!as.numeric(as.character(g[1,9]))==0.00){
+      Y<-as.numeric(as.character(g[1,9]))
+      y<-3
+    }else if (!as.numeric(as.character(g[1,8]))==0.00){
+      Y<-as.numeric(as.character(g[1,8]))
+      y<-2
+    }
+    gap<-(Y-X)/(y-x)
+    gap<-round(gap,digits = 2)
+    if (as.numeric(as.character(g[1,8]))==0.00){
+      g[1,8]<-as.numeric(as.character((as.numeric(as.character(g[1,9]))-gap)))
+    }
+    if (as.numeric(as.character(g[1,7]))==0.00){
+      g[1,7]<-as.numeric(as.character((as.numeric(as.character(g[1,8]))-gap)))
+    }
+    if (as.numeric(as.character(g[1,10]))==0.00){
+      g[1,10]<-as.numeric(as.character((as.numeric(as.character(g[1,9]))+gap)))
+    }
+    
+    if (as.numeric(as.character(g[1,11]))==0.00){
+      g[1,11]<-as.numeric(as.character((as.numeric(as.character(g[1,10]))+gap)))
+    }
+    g$gap<-gap
+    
+    
+    
+    h<-rbind(h,g)
+  }
+  
+  
+  B<-paste("/home/shicp/program/download/",j,"_list0.csv",sep='')
+  samplelist<-read.csv(B,header = TRUE)
+  samplelist[which(samplelist$CPE<= 0.6),8]<-0
+  samplelist[which(samplelist$CPE> 0.6),8]<-1
+  # samplelist[which(samplelist$IHC<= 0.6),6]<-"0.615"
+  # 
+  # samplelist<-samplelist[which(samplelist$IHC>0.59),]
+  # 
+  # samplelist$lable<-samplelist$IHC
+  # 
+  # samplelist[which(samplelist$IHC<= 0.63),6]<-"0.615"
+  # samplelist[intersect(which(samplelist$IHC<= 0.66),which(samplelist$IHC> 0.63)),6]<-"0.645"
+  # samplelist[intersect(which(samplelist$IHC<=  0.69),which(samplelist$IHC> 0.66)),6]<-"0.675"
+  # samplelist[intersect(which(samplelist$IHC<= 0.72),which(samplelist$IHC> 0.69)),6]<-"0.705"
+  # samplelist[intersect(which(samplelist$IHC<= 0.75),which(samplelist$IHC> 0.72)),6]<-"0.735"
+  # samplelist[intersect(which(samplelist$IHC<= 0.78),which(samplelist$IHC> 0.75 )),6]<-"0.765"
+  # samplelist[intersect(which(samplelist$IHC<= 0.81),which(samplelist$IHC> 0.78 )),6]<-"0.795"
+  # samplelist[intersect(which(samplelist$IHC<= 0.84),which(samplelist$IHC> 0.81 )),6]<-"0.825"
+  # samplelist[intersect(which(samplelist$IHC<= 0.87),which(samplelist$IHC> 0.84 )),6]<-"0.855"
+  # samplelist[intersect(which(samplelist$IHC<= 0.90),which(samplelist$IHC> 0.87 )),6]<-"0.885"
+  # samplelist[intersect(which(samplelist$IHC<= 0.93),which(samplelist$IHC> 0.90 )),6]<-"0.915"
+  # samplelist[intersect(which(samplelist$IHC<= 0.96),which(samplelist$IHC> 0.93 )),6]<-"0.945"
+  # samplelist[intersect(which(samplelist$IHC<= 1),which(samplelist$IHC> 0.96 )),6]<-"0.98"
+  samplelist=samplelist[complete.cases(samplelist$CPE),]
+  #h=h[-which(h$A1=="NaN"),]
+  samplelist<-merge.data.frame(samplelist,h,all.x = FALSE,by.x = "Sample.ID",by.y = "sample")
+  
+  S<-paste("/home/shicp/program/final/",j,".csv",sep='')
+  write.csv(samplelist,file=S,quote = FALSE,row.names = FALSE)
+  }
+
+#assign(i,data_V2.0)
+A<-read.table("/home/shicp/program/cancer.txt",header=T,sep = "\t")
+z = data.frame()
+for (j in A$TYPE) {
+  S<-paste("/home/shicp/program/final/",j,".csv",sep='')
+  final<-read.csv(S, header=T)
+  assign(j,final)
+  z<-rbind(z,final)
+}
+  
+final_all=z
+final_all=final_all[-which(final_all$A1=="NaN"),]
+ write.csv(final_all,file="/home/shicp/program/final_all.csv",quote = FALSE,row.names = FALSE)
+ 
+ 
+ 
+ 
+final_all<-read.table("/home/shicp/program/final_all.csv",header=T,sep = ",")
+#final_all<-final_all[-which(final_all$Cancer.type=="ACC"),]
+
+#A<-read.table("/home/shicp/program/cancer1.txt",header=T,sep = "\t")
+#final_all<-merge.data.frame(A,final_all,all = FALSE,by.x = "TYPE",by.y = "Cancer.type")
+#final_all
+Y<-c()
+for (i in 1:10){
+ceshi<-final_all[which(final_all$X== 0),]
+ceshi1<-final_all[which(final_all$X== 1),]
+n=dim(ceshi1)[1]
+index=sample(n,968)
+ceshi2<-ceshi1[index,];dim(ceshi1)
+FINAL<-rbind(ceshi,ceshi2)
+
+
+ #svm training
+
+#colnames(data1) = c("disease","num1", "ratio1", "num2", "ratio2", "lable")
+#dat1<- FINAL[,c("X", "A", "B","C","D","E","A1", "B1","C1","D1","E1","gap")]
+ #dat1=dat1[-which(dat1$A1=="NaN"),]
+ 
+
+#dat1=dat1[,-1]
+#dat1<- final_all[,c("lable","A1", "B1","C1","D1","E1")]
+dat1<- FINAL[,c("X","A1", "B1","C1","D1","E1","gap")]
+#dat1$lable=factor(dat1$lable)
+dat1$X=factor(dat1$X)
+svm.model=rep(list(NULL),100)
+#dat0<-as.data.frame(lapply(dat1,as.numeric))
+# dat0<-as.data.frame(lapply(dat1[,-1],as.numeric))
+# dat0$lable<-as.factor(dat1$lable)
+
+#抽取设置训练集
+n=dim(dat1)[1]
+index=sample(n,0.9*n)
+train<-dat1[index,];dim(train)
+test<-dat1[-index,];dim(test)
+
+x<-train[,-1]
+y<-train[,1]
+#model<-svm(lable~.,train)
+model<-svm(x,y,probability=T,kernel="linear",cost=0.0625)
+summary(model)
+
+
+#pred<-predict(model,test,decision.values=FALSE,probability=T)
+pred<-predict(model,test[,-1],probability=T)
+
+tab<-table(pred,test[,1])
+TP=tab[2,2];TN=tab[1,1]
+   FP=tab[2,1]
+    FN=tab[1,2]
+ACC=(TP+TN)/nrow(test)
+   Recall=TP/(TP+FN)
+   Specificity=TN/(TN+FP)
+   Precision=TP/(TP+FP)
+   MCC=(TP*TN-FP*FN)/(sqrt(TP+FN)*sqrt(TN+FP)*sqrt(TP+FP)*sqrt(TN+FN))
+   prob=c()
+   prob=c(prob,attr(pred,"probabilities")[,1])
+ b<-as.numeric(as.vector(prob))
+   library(pROC)
+    AUC=pROC::auc(test[,1],b)
+    Z<-substring(AUC,1)
+    Y<-cbind(Y,Z)
+}
+    roc(test[,1], b, plot=TRUE, print.thres=TRUE, print.auc=TRUE)
+#     prob=c()
+# prob=c(prob,attr(pred,"probabilities")[,1])
+# sum(pred==test$X)/dim(test)[1]
+# 
+# a<-as.data.frame(pred)         
+# test1<-cbind(test,a)
+# test1$lable<-as.numeric(as.character(test1$lable))
+#   test1$pred<-as.numeric(as.character(test1$pred))
+# write.csv(a,file="/home/shicp/project/prad_final.csv",quote = FALSE,row.names =FALSE)
+# 
+# G<-cor.test(test1$lable,test1$pred,use="all.obs",method ="pearson")
+
+
+
+
+
+
+####Elstic Net
+
+final_all<-read.table("/home/shicp/program/final_all.csv",header=T,sep = ",")
+final_all=final_all[-which(final_all$IHC=="NA"),]
+
+
+ceshi<-final_all[,c(6,11:21)]
+ceshi<-ceshi[complete.cases(ceshi),]
+
+n=dim(ceshi)[1]
+index=sample(n,0.8*n)
+train<-ceshi[index,];dim(train)
+test<-ceshi[-index,];dim(test)
+
+x=as.matrix(train[,-1])
+#x=matrix(rnorm(100*20),100,20)
+y=as.matrix(train[1])
+x1<-as.matrix(test[,-1])
+y1<-as.matrix(test[,1])
+g2=sample(1:2,nrow(dat1),replace=TRUE)
+g4=sample(1:4,nrow(dat1),replace=TRUE)
+fit1=glmnet(x,y)
+summary(fit1)
+pred<-predict(fit1,newx=x1,s=c(0.01,0.005))
+cor.test(pred[,1],y1,use="all.obs",method ="pearson")
+
+
+fit.lasso <- glmnet(x, y, family="gaussian", alpha=1)
+pred<-predict(fit.lasso,newx=x1,s=c(0.01,0.005))
+cor.test(pred[,1],y1,use="all.obs",method ="pearson")
+
+fit.ridge <- glmnet(x, y, family="gaussian", alpha=0)
+pred<-predict(fit.ridge,newx=x1,s=c(0.01,0.005))
+cor.test(pred[,1],y1,use="all.obs",method ="pearson")
+
+fit.elnet <- glmnet(x, y, family="gaussian", alpha=.5)
+pred<-predict(fit.elnet,newx=x1,s=c(0.01,0.005))
+cor.test(pred[,1],y1,use="all.obs",method ="pearson")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  
+  
+  
+ 
+  
+  
+  
+  
+  
+ final_all<-read.table("/home/shicp/program/final_all.csv",header=T,sep = ",")
+   final_all[which(final_all$IHC<= 0.8),8]<-0
+  final_all[which(final_all$IHC> 0.8),8]<-1
+    final_all=final_all[complete.cases(final_all$IHC),]
+  
+# final_all<-final_all[-which(final_all$Cancer.type=="ACC"),]
+# final_all<-final_all[-which(final_all$Cancer.type=="KICH"),]
+# final_all<-final_all[-which(final_all$Cancer.type=="UCS"),]
+# final_all<-final_all[-which(final_all$Cancer.type=="READ"),]
+# final_all<-final_all[-which(final_all$Cancer.type=="KIRP"),]
+# final_all<-final_all[-which(final_all$Cancer.type=="CESC"),]
+# final_all<-final_all[-which(final_all$Cancer.type=="KIRP"),]
+# final_all<-final_all[-which(final_all$Cancer.type=="KIRP"),]
+
+Y<-c()
+for (i in 1:10){
+ceshi<-final_all[which(final_all$X== 0),]
+ceshi1<-final_all[which(final_all$X== 1),]
+n=dim(ceshi)[1]
+index=sample(n,3235)
+ceshi2<-ceshi[index,];dim(ceshi)
+FINAL<-rbind(ceshi1,ceshi2)
+dat1<- FINAL[,c("X","A1", "B1","C1","D1","E1","gap")]
+dat1$X=factor(dat1$X)
+svm.model=rep(list(NULL),100)
+n=dim(dat1)[1]
+index=sample(n,0.8*n)
+train<-dat1[index,];dim(train)
+test<-dat1[-index,];dim(test)
+x<-train[,-1]
+y<-train[,1]
+model<-svm(x,y,probability=T,kernel="linear",cost=0.0625)
+summary(model)
+pred<-predict(model,test[,-1],probability=T)
+tab<-table(pred,test[,1])
+TP=tab[2,2];TN=tab[1,1]
+   FP=tab[2,1]
+    FN=tab[1,2]
+ACC=(TP+TN)/nrow(test)
+   Recall=TP/(TP+FN)
+   Specificity=TN/(TN+FP)
+   Precision=TP/(TP+FP)
+   MCC=(TP*TN-FP*FN)/(sqrt(TP+FN)*sqrt(TN+FP)*sqrt(TP+FP)*sqrt(TN+FN))
+   prob=c()
+   prob=c(prob,attr(pred,"probabilities")[,1])
+ b<-as.numeric(as.vector(prob))
+   library(pROC)
+    AUC=pROC::auc(test[,1],b)
+    Z<-substring(AUC,1)
+    Y<-cbind(Y,Z)
+}
+                                                                                                                                                            
+    roc(test[,1], b, plot=TRUE, print.thres=TRUE, print.auc=TRUE)
+  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
