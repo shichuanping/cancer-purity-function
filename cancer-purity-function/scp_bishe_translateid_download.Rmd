@@ -1,0 +1,412 @@
+﻿---
+title: "BRCA"
+author: "chuanping shi"
+date: "2019/3/12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+
+library(GenomicDataCommons)
+library(magrittr)
+library(e1071)
+library(pROC)
+library(MASS)
+#file download from paper, include IHC value
+sample_alllist<- read.table("/home/shicp/project/FINAL/sample_alllist.txt",header=T,sep = "\t")
+###TCGA cancer types
+CANCER_type<- read.table("/home/shicp/project/FINAL/CANCER_type.txt",header=T,sep = "\t")
+path <- "/home/shicp/project/FINAL/"
+
+# translate TCGA uuid to barcode
+TCGAtranslateID = function(file_names, legacy = FALSE)
+{
+  #parameter annotation
+  #return eg. col1, col2 
+  info = files(legacy = legacy) %>%
+  GenomicDataCommons::filter( ~ file_id %in% file_names$id) %>%
+  GenomicDataCommons::select('cases.samples.submitter_id') %>%
+  GenomicDataCommons::results_all()
+# extract TCGA barcodes
+# id_list will contain a list (one item for each file_id)
+# of TCGA barcodes of the form 'TCGA-XX-YYYY-ZZZ'
+  id_list = lapply(info$cases,function(a)
+  {
+    a[[1]][[1]][[1]]
+  })
+# so we can later expand to a data.frame of the right size
+  barcodes_per_file = sapply(id_list,length)
+# And build the data.frame
+  return(data.frame(file_id = rep(GenomicDataCommons::ids(info), barcodes_per_file), submitter_id = unlist(id_list)))
+}
+
+
+#forloop all cancer types and write a annotation file
+for(i in CANCER_type$CANCER_type){
+  subtype_sample_alllist<-sample_alllist[which(sample_alllist$Cancer.type==i),]
+  # eg. "/home/shicp/project/FINAL/ACC_CNV.txt", manifeast file downloaded from TCGA
+  subtype_cnv_file<-paste0(path,i,"_CNV.txt",seq="",collapse = "")
+  # eg. "/home/shicp/project/FINAL/ACC_SNV.txt", manifeast file download from TCGA
+  subtype_snv_file <-paste0(path,i,"_SNV.txt",seq="",collapse = "")
+  subtype_cnv_df <- read.table(subtype_cnv_file,header=T,sep = "\t")
+  subtype_snv_df <- read.table(subtype_snv_file,header=T,sep = "\t")
+  TCGA_CNV_TXT_id_trnslater <- TCGAtranslateID(subtype_cnv_df)
+  TCGA_SNV_VCF_id_trnslater <- TCGAtranslateID(subtype_snv_df)
+
+  #rename columns
+  colnames(TCGA_CNV_TXT_id_trnslater)<-c("cnv_uuid","Sample.ID")
+  colnames(TCGA_SNV_VCF_id_trnslater)<-c("snv_uuid","Sample.ID")
+  #merge columns
+  subtype_sample_alllist<-merge.data.frame(subtype_sample_alllist, TCGA_SNV_VCF_id_trnslater, all =  FALSE, by.x = "Sample.ID", by.y = "Sample.ID" )
+  subtype_sample_alllist<-merge.data.frame(subtype_sample_alllist, TCGA_CNV_TXT_id_trnslater, all = FALSE, by="Sample.ID")
+  #mark duplicate
+  subtype_sample_alllist_unique <- subtype_sample_alllist[!duplicated(subtype_sample_alllist$Sample.ID), ]
+  subtype_sample_alllist_unique_file_path <- paste0(path,i,"_list0.csv",seq="",collapse = "")
+  #write
+  write.csv(subtype_sample_alllist_unique, file=subtype_sample_alllist_unique_file_path, quote = FALSE, row.names =FALSE)
+}
+
+
+#step 1, data preprocess
+data_preprocess = function( one_cancer){
+    cancer_CNV_dir <- paste("/home/shicp/program", one_cancer, "CNV", sep='/')
+    fileNames_v <- dir(cancer_CNV_dir)
+    #read CNV table
+    filePath_matrix <- sapply(fileNames_v, function(x){ paste(cancer_CNV_dir, x, sep='/')})   ##生成读取文件路径
+    data_list <- lapply(filePath_matrix, function(x){ read.table(x, header=T,sep = "\t")})
+    #add segment length column 
+    data_step3 = list()
+    for (j in 1:length(data_list)) {
+      data_list[[j]]$length <- data_list[[j]]$End - data_list[[j]]$Start
+      data_list[[j]]$Segment_Mean <- round(data_list[[j]]$Segment_Mean, digits = 3)
+      
+      data_list[[j]]<-data_list[[j]][which(data_list[[j]]$length > 1000000),]
+      
+      data_new <-as.data.frame(tapply(data_list[[j]]$length, data_list[[j]]$Segment_Mean, sum))
+      colnames(data_new)="number"
+      data_new$Segment_Mean = rownames(data_new)
+      data_new$number<-round(data_new$number/1000000,digits = 0)
+      number_of_region = as.vector(data_new$number)
+      whole_segment_mean = as.vector(data_new$Segment_Mean)
+      z<-c()
+      for (I in 1:length(number_of_region)){
+      x = rep(whole_segment_mean[I], number_of_region[I])
+      z<-c(z,x)
+    }
+    data_step3[[j]] = z
+   }
+  return(data_step3)
+}
+
+
+#step 2: CNV clustering
+
+cluster_process = function(data_step3, one_cancer){
+  data_step4 = list()
+  fileNames_new_v = c()
+  data_step4_filter_out = 0
+  data_step4_filter_in = 0
+  returnlist = list()
+  cancer_CNV_dir <- paste("/home/shicp/program", one_cancer, "CNV", sep='/')
+  fileNames_v <- dir(cancer_CNV_dir)
+  for (j in 1:length(data_step3)) {
+    #check if only cluster in one class
+    pamk.result <-pamk(as.numeric(data_step3[[j]]),krange=2,criterion="asw", usepam=TRUE,
+      scaling=FALSE, alpha=0.001, diss=inherits(data, "dist"),    critout=FALSE, ns=8, seed=NULL)
+    
+    cluster_criteria<-dudahart2(as.numeric(data_step3[[j]]), pamk.result[[1]]$clustering, alpha=0.05)$cluster1
+    #name <- fileNames[j]
+    #print(cluster_criteria)
+    if (cluster_criteria == TRUE){
+      data_step4_filter_in = 1 + data_step4_filter_in
+      #clustering
+      pamk.result <-pamk(as.numeric(data_step3[[j]]), krange=2:8, criterion="asw", usepam=TRUE,
+      scaling=FALSE, alpha=0.001, diss=inherits(data, "dist"),    critout=FALSE, ns=8, seed=NULL)
+      #class lable
+      clustering_label <- pamk.result[[1]]$clustering
+    
+      clustering_label_summary <-as.data.frame(table(clustering_label))
+      
+      #b<-as.data.frame(clustering_label_summary[,2])
+      #c<-as.data.frame(pamk.result[[1]]$medoids)
+      cluster_result =  as.data.frame(cbind(clustering_label_summary[,2], pamk.result[[1]]$medoids))
+      colnames(cluster_result)[1:2]<-c("Length","Segment_Mean")
+      data_step4[[data_step4_filter_in]] = cluster_result
+      fileNames_new_v[data_step4_filter_in] = fileNames_v [j]
+      #assign(name,d)
+    }else{
+    data_step4_filter_out = 1 + data_step4_filter_out
+    }
+  }
+  names(data_step4) = fileNames_new_v
+  #returnlist[[1]] = data_step4
+  #print(data_step4)
+  
+  #returnlist[[2]] = fileNames_new_v
+  return(data_step4)
+}
+
+
+
+
+
+#step 3: Extracting feature values
+
+feature_values = function(data_step4){
+  #data_step4 = returnlist[[1]] 
+  fileNames_new_v = names(data_step4) 
+  
+  Poor_clustering_sample<-c()
+  #data_step5 = list()
+  one_sampel_data = data.frame()
+  total_sample_data = data.frame()
+  
+  for(i in 1:length(data_step4)){
+    #attach labels
+    #data_step4[[i]]$Segment_Mean<-round(data_step4[[i]]$Segment_Mean,digits = 2)
+    data_step4[[i]]$label<-data_step4[[i]]$Segment_Mean
+    
+    #column 3 is copy number
+    data_step4[[i]][which(data_step4[[i]]$Segment_Mean<= -0.6), 3]<-"A"
+    data_step4[[i]][intersect(which(data_step4[[i]]$Segment_Mean<= -0.1),which(data_step4[[i]]$Segment_Mean> -0.6)),3]<-"B"
+    data_step4[[i]][intersect(which(data_step4[[i]]$Segment_Mean<=  0.4),which(data_step4[[i]]$Segment_Mean> -0.1)),3]<-"C"
+    data_step4[[i]][intersect(which(data_step4[[i]]$Segment_Mean<= 0.9),which(data_step4[[i]]$Segment_Mean> 0.4)),3]<-"D"
+    data_step4[[i]][intersect(which(data_step4[[i]]$Segment_Mean<= 1.4),which(data_step4[[i]]$Segment_Mean> 0.9 )),3]<-"E"
+    data_step4[[i]][intersect(which(data_step4[[i]]$Segment_Mean<= 1.9),which(data_step4[[i]]$Segment_Mean> 1.4 )),3]<-"F"
+    data_step4[[i]][intersect(which(data_step4[[i]]$Segment_Mean<= 2.3),which(data_step4[[i]]$Segment_Mean> 1.9 )),3]<-"G"
+    data_step4[[i]][intersect(which(data_step4[[i]]$Segment_Mean<= 2.8),which(data_step4[[i]]$Segment_Mean> 2.3 )),3]<-"H"
+    data_step4[[i]][intersect(which(data_step4[[i]]$Segment_Mean<= 3.3),which(data_step4[[i]]$Segment_Mean> 2.8 )),3]<-"I"
+    label <- as.data.frame(table(data_step4[[i]]$label))
+    #find out Poor clustering sample
+    if (any(label$Freq > 1)){Poor_clustering_sample<-rbind(Poor_clustering_sample,fileNames_new_v[i])}
+
+    #Add the length which have same label
+    add_lenth<-as.data.frame(tapply(data_step4[[i]]$Length, data_step4[[i]]$label, sum))
+    colnames(add_lenth)="length"
+    add_lenth$label<-rownames(add_lenth)
+    
+    data_result<-merge.data.frame(add_lenth,data_step4[[i]],all.x = FALSE,by.x = "label",by.y = "label")
+    
+    data_result<-data_result[!duplicated(data_result$label),-3]
+    #add flank value
+    one_sample_data = data.frame(label=c("A","B","C","D","E","F","G","H"))
+    one_sample_data<-merge.data.frame(one_sample_data,data_result,by.y = "label",by.x = "label",all.x = TRUE)
+    one_sample_data[is.na(one_sample_data)] <- 0
+    
+    one_sample_data<-as.data.frame(t(one_sample_data),stringsAsFactors=FALSE)
+    one_sample_data<-cbind.data.frame(one_sample_data[2,],one_sample_data[3,],stringsAsFactors=FALSE)
+    colnames(one_sample_data)<-c("A","B","C","D","E","F","G","H","A1","B1","C1","D1","E1","F1","G1","H1")
+    #calculate gap
+    label_order_dataframe =  data.frame(order=c(1, 2, 3, 4, 5, 6, 7, 8))
+    rownames(label_order_dataframe) = c("A","B","C","D","E","F","G","H")
+    gap = (data_result$Segment_Mean[length(data_result)] - data_result$Segment_Mean[1]) / (label_order_dataframe[data_result$label[length(data_result)], "order"] - label_order_dataframe[data_result$label[1], "order"])
+    
+    one_sample_data$sample<-strsplit(fileNames_new_v[i], ".txt")
+
+    
+    gap<-round(gap,digits = 2)
+    one_sample_data$gap<-gap
+    
+    if (as.numeric(as.character(one_sample_data[1,10]))==0.00){
+      one_sample_data[1,10]<-as.numeric(as.character((as.numeric(as.character(one_sample_data[1,11]))-gap)))
+    }
+    if (as.numeric(as.character(one_sample_data[1,9]))==0.00){
+      one_sample_data[1,9]<-as.numeric(as.character((as.numeric(as.character(one_sample_data[1,10]))-gap)))
+    }
+    if (as.numeric(as.character(one_sample_data[1,12]))==0.00){
+      one_sample_data[1,12]<-as.numeric(as.character((as.numeric(as.character(one_sample_data[1,11]))+gap)))
+    }
+    if (as.numeric(as.character(one_sample_data[1,13]))==0.00){
+      one_sample_data[1,13]<-as.numeric(as.character((as.numeric(as.character(one_sample_data[1,12]))+gap)))
+      }
+    if (as.numeric(as.character(one_sample_data[1,14]))==0.00){
+      one_sample_data[1,14]<-as.numeric(as.character((as.numeric(as.character(one_sample_data[1,13]))+gap)))
+      }
+    if (as.numeric(as.character(one_sample_data[1,15]))==0.00){
+      one_sample_data[1,15]<-as.numeric(as.character((as.numeric(as.character(one_sample_data[1,14]))+gap)))
+    }
+    if (as.numeric(as.character(one_sample_data[1,16]))==0.00){
+      one_sample_data[1,16]<-as.numeric(as.character((as.numeric(as.character(one_sample_data[1,15]))+gap)))
+    }
+    
+    
+    
+    total_sample_data<-rbind(total_sample_data, one_sample_data)
+  }
+  
+  
+  path<-paste("/home/shicp/program/download/",j,"_list0.csv",sep='')
+  samplelist<-read.csv(path,header = TRUE)
+  samplelist[which(samplelist$IHC<= 0.6),8]<-0
+  samplelist[which(samplelist$IHC> 0.6),8]<-1
+  samplelist=samplelist[complete.cases(samplelist$IHC),]
+  #h=h[-which(h$A1=="NaN"),]
+  #Establish training data set
+  samplelist<-merge.data.frame(samplelist, total_sample_data, all.x = FALSE, by.x = "Sample.ID", by.y = "sample")
+  writepath<-paste("/home/shicp/program/final/", j, ".csv",sep='')
+  write.csv(samplelist, file=writepath,quote = FALSE, row.names = FALSE)
+  return(samplelist)
+}
+
+
+
+
+
+
+#A<-read.table("/home/shicp/program/cancer.txt",header=T,sep = "\t")
+
+#step 4: construct feature data
+combine_sample = function(){
+  #all sample data frame
+  all_cancer_sample_feature = data.frame()
+  for (j in CANCER_type$CANCER_type) {
+  #preprocess
+  data_step3 = data_preprocess(one_cancer = j)
+  #clustering
+  data_step4 = cluster_process(data_step3 = data_step3,one_cancer = j)
+  #fature selecting
+  all_sample_feature = feature_values(data_step4 = data_step4)
+  all_cancer_sample_feature = rbind(all_cancer_sample_feature, all_sample_feature)
+  } 
+return(all_cancer_sample_feature)
+}
+
+
+#step 5: svm model
+svm_traing = function(all_cancer_sample_feature ){
+  final_all = all_cancer_sample_feature[complete.cases(all_cancer_sample_feature$A1),]
+  negative_sample <- all_cancer_sample_feature[which(all_cancer_sample_feature$X== 0),]
+  positive_sample <- all_cancer_sample_feature[which(all_cancer_sample_feature$X== 1),]
+
+    num_positive = nrow(positive_sample)
+    random_index = sample(num_positive,nrow(negative_sample))
+    sub_positive_sample <- positive_sample[random_index,]
+    training_data <- rbind(negative_sample, sub_positive_sample)
+    dat1<- training_data[,c("X","A1", "B1","C1","D1","E1","gap")]
+    
+    dat1$X = factor(dat1$X)
+    row_number = nrow(dat1)
+    select_row_index = sample(row_number, 0.8*row_number)
+    
+    training_set <- dat1[select_row_index,]
+    test_set <- dat1[-select_row_index,]
+    model <- svm(training_set[, -1], training_set[,1], probability=T,kernel="linear",cost=0.0625)
+    #summary(model)
+    pred_result <- predict(model, test_set[,-1], probability=T)
+    result_table <- table(pred_result, test_set[,1])
+    
+    TP=result_table[2,2];TN=result_table[1,1]
+    FP=result_table[2,1];FN=result_table[1,2]
+    
+    ACC=(TP+TN)/nrow(test_set)
+    Recall=TP/(TP+FN)
+    Specificity=TN/(TN+FP)
+    Precision=TP/(TP+FP)
+    MCC=(TP*TN-FP*FN)/(sqrt(TP+FN)*sqrt(TN+FP)*sqrt(TP+FP)*sqrt(TN+FN))
+    prob=c()
+    prob=c(prob,attr(pred_result,"probabilities")[,1])
+    AUC=pROC::auc(test_set[,1], as.numeric(as.vector(prob)))
+    roc(test_set[,1], as.numeric(as.vector(prob)), plot=TRUE, print.thres=TRUE, print.auc=TRUE)
+    return(AUC)
+    #Z<-substring(AUC,1)
+}
+
+
+####step 6: Elstic Net
+model_elasticnet = function(all_cancer_sample_feature){
+  #final_all<-read.table("/home/shicp/program/final_all.csv",header=T,sep = ",")
+  #final_all=final_all[-which(final_all$IHC=="NA"),]
+
+
+sub_set<-all_cancer_sample_feature[,c(6,11:21)]
+sub_set<-sub_set[complete.cases(sub_set),]
+
+number_of_row = nrow(sub_set)
+random_index = sample(number_of_row, 0.8*number_of_row)
+training_set<-sub_set[random_index,]
+test_set<-sub_set[-random_index,]
+
+training_x=as.matrix(training_set[,-1])
+#x=matrix(rnorm(100*20),100,20)
+training_y=as.matrix(training_set[1])
+test_x<-as.matrix(test_set[,-1])
+test_y<-as.matrix(test_set[,1])
+#g2=sample(1:2,nrow(dat1),replace=TRUE)
+#g4=sample(1:4,nrow(dat1),replace=TRUE)
+
+
+#lasso
+fit.lasso <- glmnet(training_x, training_y, family="gaussian", alpha=1)
+pred<-predict(fit.lasso, newx=test_x, s=c(0.01,0.005))
+coeffient_lasso = cor.test(pred[,1], test_y, use="all.obs", method ="pearson")
+
+
+#ridge
+fit.ridge <- glmnet(training_x, training_y, family="gaussian", alpha=0)
+pred<-predict(fit.ridge, newx=test_x, s=c(0.01,0.005))
+coeffient_ridge = cor.test(pred[,1], test_y, use="all.obs", method ="pearson")
+
+#elnet
+fit.elnet <- glmnet(training_x, training_y, family="gaussian", alpha=.5)
+pred <- predict(fit.elnet, newx=test_x, s=c(0.01,0.005))
+coeffient_elnet = cor.test(pred[,1],test_y, use="all.obs", method ="pearson")
+
+return(coeffient_elnet)  
+}
+
+
+
+#all_cancer_sample_feature_tttttt=all_cancer_sample_feature[-which(all_cancer_sample_feature$A1=="NaN"),]
+
+
+
+
+
+all_cancer_sample_feature = combine_sample()
+auc = svm_traing(all_cancer_sample_feature = all_cancer_sample_feature)
+cor = model_elasticnet(all_cancer_sample_feature = all_cancer_sample_feature)
+
+  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
